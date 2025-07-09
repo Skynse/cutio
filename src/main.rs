@@ -16,7 +16,7 @@ fn main() -> eframe::Result<()> {
     // Dummy video clip and track for testing
     let video_clip = VideoClip {
         id: "clip1".to_string(),
-        asset_path: "test.mp4".to_string(),
+        asset_path: r"C:\Users\austi\projects\cutio\testdata\sample.mp4".to_string(),
         in_point: 0.0,
         out_point: 5.0,
         start_time: 0.0,
@@ -60,7 +60,9 @@ fn main() -> eframe::Result<()> {
     // So we construct AppState without video_player first, then create VideoPlayer, then set it in AppState
     let app_state = AppState {
         project,
-        video_player: VideoPlayer::new(PathBuf::from("test.mp4")),
+        video_player: VideoPlayer::new(PathBuf::from(
+            r"C:\Users\austi\projects\cutio\testdata\sample.mp4",
+        )),
         playback_state,
         timeline_state: crate::ui::timeline_widget::TimelineState::new(),
     };

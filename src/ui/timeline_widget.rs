@@ -90,23 +90,13 @@ impl TimelineState {
 
     /// Convert time to screen x position
     pub fn time_to_x(&self, time: f64) -> f32 {
-        // panic if time is neg or overflow
-        if time < 0.0 || time > f64::MAX {
-            panic!("Time out of bounds");
-        }
         let a = (time as f32 * self.zoom) - self.scroll_x;
-        println!("time_to_x: {}", a);
         a
     }
 
     /// Convert screen x position to time
     pub fn x_to_time(&self, x: f32) -> f64 {
-        // panic if time is neg or overflow
-        if x < 0.0 || x > f32::MAX {
-            panic!("Time out of bounds");
-        }
         let a = ((x + self.scroll_x) / self.zoom) as f64;
-        println!("x_to_time: {}", a);
         a
     }
 

@@ -43,9 +43,12 @@ impl eframe::App for CutioApp {
                 } else {
                     Duration::from_secs(0)
                 };
-                if dt >= Duration::from_secs_f32(1.0) {
+
+                // Update more frequently for smoother playback
+                if dt >= Duration::from_millis(33) {
+                    // ~30 FPS update rate
                     *last = Some(now);
-                    1.0
+                    dt.as_secs_f64()
                 } else {
                     if last.is_none() {
                         *last = Some(now);
@@ -53,13 +56,22 @@ impl eframe::App for CutioApp {
                     0.0
                 }
             });
+
             if elapsed > 0.0 {
+                // Clamp elapsed time to prevent large jumps
+                let elapsed = elapsed.min(0.1); // Max 100ms jump
                 self.state.playback_state.playhead += elapsed;
+
                 // Clamp playhead to timeline duration
                 let timeline = &self.state.project.timeline;
                 let max_time = timeline.duration.max(999.0);
                 self.state.playback_state.playhead =
                     self.state.playback_state.playhead.clamp(0.0, max_time);
+
+                // Update video player frame
+                let playhead_frame = (self.state.playback_state.playhead * 30.0) as usize;
+                self.state.video_player.set_frame(playhead_frame, ctx);
+
                 ctx.request_repaint(); // keep ticking
             } else {
                 // Schedule next repaint to keep playback smooth
@@ -96,9 +108,11 @@ impl eframe::App for CutioApp {
 
         // Right/Top: Video Player
         egui::TopBottomPanel::top("video_player_panel").show(ctx, |ui| {
-            // The video player should show the frame at the current playhead
-            let playhead_frame = self.state.playback_state.playhead as usize;
-            self.state.video_player.set_frame(playhead_frame, ctx);
+            // Only update frame if not playing (to avoid double updates)
+            if !self.state.playback_state.is_playing {
+                let playhead_frame = (self.state.playback_state.playhead * 30.0) as usize;
+                self.state.video_player.set_frame(playhead_frame, ctx);
+            }
             self.state.video_player.show(ui, ctx);
         });
 
@@ -123,12 +137,7 @@ impl eframe::App for CutioApp {
                         }
                         if ui.button("<<").clicked() {
                             self.state.playback_state.playhead =
-                                self.state.playback_state.playhead.sub(1.0);
-                            self.state.playback_state.playhead = self
-                                .state
-                                .playback_state
-                                .playhead
-                                .clamp(0.0, self.state.playback_state.playhead);
+                                (self.state.playback_state.playhead - 1.0).max(0.0);
                             let timeline = &self.state.project.timeline;
                             let max_time = timeline.duration.max(999.0);
                             self.state.playback_state.playhead =

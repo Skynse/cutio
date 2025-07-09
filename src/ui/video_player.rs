@@ -29,8 +29,11 @@ impl VideoPlayer {
 
     /// Set the frame to display and update the texture if needed.
     pub fn set_frame(&mut self, frame: usize, ctx: &egui::Context) {
-        if self.current_frame != frame {
-            self.current_frame = frame;
+        // Clamp frame to reasonable bounds
+        let clamped_frame = frame.min(1_000_000); // Max 1M frames (about 9 hours at 30fps)
+
+        if self.current_frame != clamped_frame {
+            self.current_frame = clamped_frame;
             self.decode_and_upload_frame(ctx);
         }
     }
@@ -41,6 +44,14 @@ impl VideoPlayer {
         let _ = gst::init(); // Safe to call multiple times
 
         let path_str = self.path.to_string_lossy();
+
+        // Check if file exists before trying to create pipeline
+        if !self.path.exists() {
+            eprintln!("Video file does not exist: {}", path_str);
+            self.texture = None;
+            return;
+        }
+
         let pipeline_str = format!(
             "filesrc location=\"{}\" ! decodebin ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink",
             path_str
@@ -48,7 +59,8 @@ impl VideoPlayer {
 
         let pipeline = match gst::parse::launch(&pipeline_str) {
             Ok(p) => p,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("Failed to create GStreamer pipeline: {}", e);
                 self.texture = None;
                 return;
             }
@@ -60,53 +72,141 @@ impl VideoPlayer {
         // Seek to the desired frame (approximate by time)
         // For simplicity, assume 30fps
         let fps = 30.0;
-        let seek_time = (self.current_frame as f64 / fps * 1_000_000_000.0) as u64;
-        pipeline.set_state(gst::State::Paused).ok();
-        pipeline
-            .seek_simple(
-                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_nseconds(seek_time),
-            )
-            .ok();
-        pipeline.set_state(gst::State::Playing).ok();
+        let seek_time_seconds = self.current_frame as f64 / fps;
+
+        // Clamp seek time to reasonable bounds (0 to 1 hour max)
+        let seek_time_seconds = seek_time_seconds.max(0.0).min(3600.0);
+        let seek_time_ns = (seek_time_seconds * 1_000_000_000.0) as u64;
+
+        if let Err(e) = pipeline.set_state(gst::State::Paused) {
+            eprintln!("Failed to set pipeline to paused: {}", e);
+            self.texture = None;
+            return;
+        }
+
+        if let Err(e) = pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_nseconds(seek_time_ns),
+        ) {
+            eprintln!("Failed to seek to frame {}: {}", self.current_frame, e);
+            pipeline.set_state(gst::State::Null).ok();
+            self.texture = None;
+            return;
+        }
+
+        if let Err(e) = pipeline.set_state(gst::State::Playing) {
+            eprintln!("Failed to set pipeline to playing: {}", e);
+            pipeline.set_state(gst::State::Null).ok();
+            self.texture = None;
+            return;
+        }
 
         // Pull the sample from appsink
         let sink = match pipeline.by_name("sink") {
             Some(s) => match s.clone().downcast::<gst_app::AppSink>() {
                 Ok(appsink) => appsink,
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("Failed to downcast to AppSink: {:?}", e);
                     self.texture = None;
                     pipeline.set_state(gst::State::Null).ok();
                     return;
                 }
             },
             None => {
+                eprintln!("Could not find sink element in pipeline");
                 self.texture = None;
                 pipeline.set_state(gst::State::Null).ok();
                 return;
             }
         };
 
+        // Wait a bit for the pipeline to process
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         let sample_result = sink.pull_sample();
         pipeline.set_state(gst::State::Null).ok();
 
-        if let Ok(sample) = sample_result {
-            let buffer = sample.buffer().unwrap();
-            let map = buffer.map_readable().unwrap();
-            let caps = sample.caps().unwrap();
-            let s = caps.structure(0).unwrap();
-            let width = s.get::<i32>("width").unwrap() as u32;
-            let height = s.get::<i32>("height").unwrap() as u32;
-            let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, map.as_slice().to_vec())
-                .unwrap();
-            let color_img = egui::ColorImage::from_rgba_unmultiplied(
-                [width as usize, height as usize],
-                bytemuck::cast_slice(img.as_raw()),
-            );
-            self.texture =
-                Some(ctx.load_texture("video_frame", color_img, egui::TextureOptions::default()));
-        } else {
-            self.texture = None;
+        match sample_result {
+            Ok(sample) => {
+                match (sample.buffer(), sample.caps()) {
+                    (Some(buffer), Some(caps)) => {
+                        match buffer.map_readable() {
+                            Ok(map) => {
+                                match caps.structure(0) {
+                                    Some(s) => {
+                                        match (s.get::<i32>("width"), s.get::<i32>("height")) {
+                                            (Ok(width), Ok(height)) => {
+                                                let width = width as u32;
+                                                let height = height as u32;
+
+                                                // Validate dimensions
+                                                if width == 0
+                                                    || height == 0
+                                                    || width > 8192
+                                                    || height > 8192
+                                                {
+                                                    eprintln!(
+                                                        "Invalid video dimensions: {}x{}",
+                                                        width, height
+                                                    );
+                                                    self.texture = None;
+                                                    return;
+                                                }
+
+                                                match ImageBuffer::<Rgba<u8>, _>::from_raw(
+                                                    width,
+                                                    height,
+                                                    map.as_slice().to_vec(),
+                                                ) {
+                                                    Some(img) => {
+                                                        let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                                                            [width as usize, height as usize],
+                                                            bytemuck::cast_slice(img.as_raw()),
+                                                        );
+                                                        self.texture = Some(ctx.load_texture(
+                                                            "video_frame",
+                                                            color_img,
+                                                            egui::TextureOptions::default(),
+                                                        ));
+                                                    }
+                                                    None => {
+                                                        eprintln!(
+                                                            "Failed to create ImageBuffer from video data"
+                                                        );
+                                                        self.texture = None;
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                eprintln!(
+                                                    "Failed to get width/height from video caps"
+                                                );
+                                                self.texture = None;
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        eprintln!("Failed to get structure from video caps");
+                                        self.texture = None;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to map buffer: {}", e);
+                                self.texture = None;
+                            }
+                        }
+                    }
+                    _ => {
+                        eprintln!("Failed to get buffer or caps from sample");
+                        self.texture = None;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to pull sample from sink: {}", e);
+                self.texture = None;
+            }
         }
     }
 
