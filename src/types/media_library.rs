@@ -87,27 +87,53 @@ impl MediaLibrary {
                 file_descriptor: fd,
             });
         } else if mime_type == "video" {
-            // Extract thumbnail using ffmpeg
+            // Extract thumbnail using GStreamer
             let thumbnail_path = {
-                let thumb_path = format!("{}.thumb.png", path_str);
-                let ffmpeg_status = Command::new("ffmpeg")
-                    .args(&[
-                        "-y",
-                        "-i",
-                        &path_str,
-                        "-ss",
-                        "00:00:01.000",
-                        "-vframes",
-                        "1",
-                        &thumb_path,
-                    ])
-                    .status();
-                if let Ok(status) = ffmpeg_status {
-                    if status.success() && std::path::Path::new(&thumb_path).exists() {
-                        Some(thumb_path)
-                    } else {
-                        None
+                let thumb_path = format!("{}.thumb.jpg", path_str);
+                let gst_status = {
+                    use gst::prelude::*;
+                    use gstreamer as gst;
+                    let _ = gst::init(); // Safe to call multiple times
+
+                    let pipeline_str = format!(
+                        "filesrc location=\"{}\" ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=RGB ! jpegenc ! multifilesink location=\"{}\" next-file=key-frame",
+                        path_str, thumb_path
+                    );
+                    let pipeline = match gst::parse::launch(&pipeline_str) {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    let pipeline = pipeline
+                        .downcast::<gst::Pipeline>()
+                        .expect("Expected a gst::Pipeline");
+
+                    pipeline.set_state(gst::State::Paused).ok();
+                    pipeline
+                        .seek_simple(
+                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::ClockTime::from_seconds(1),
+                        )
+                        .ok();
+                    pipeline.set_state(gst::State::Playing).ok();
+
+                    let bus = pipeline.bus().unwrap();
+                    let mut success = false;
+                    for msg in bus.iter_timed(gst::ClockTime::from_seconds(5)) {
+                        use gst::MessageView;
+                        match msg.view() {
+                            MessageView::Eos(..) => {
+                                success = true;
+                                break;
+                            }
+                            MessageView::Error(_) => break,
+                            _ => (),
+                        }
                     }
+                    pipeline.set_state(gst::State::Null).ok();
+                    success
+                };
+                if gst_status && std::path::Path::new(&thumb_path).exists() {
+                    Some(thumb_path)
                 } else {
                     None
                 }

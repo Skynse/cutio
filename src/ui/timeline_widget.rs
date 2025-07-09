@@ -90,12 +90,24 @@ impl TimelineState {
 
     /// Convert time to screen x position
     pub fn time_to_x(&self, time: f64) -> f32 {
-        (time as f32 * self.zoom) - self.scroll_x
+        // panic if time is neg or overflow
+        if time < 0.0 || time > f64::MAX {
+            panic!("Time out of bounds");
+        }
+        let a = (time as f32 * self.zoom) - self.scroll_x;
+        println!("time_to_x: {}", a);
+        a
     }
 
     /// Convert screen x position to time
     pub fn x_to_time(&self, x: f32) -> f64 {
-        ((x + self.scroll_x) / self.zoom) as f64
+        // panic if time is neg or overflow
+        if x < 0.0 || x > f32::MAX {
+            panic!("Time out of bounds");
+        }
+        let a = ((x + self.scroll_x) / self.zoom) as f64;
+        println!("x_to_time: {}", a);
+        a
     }
 
     /// Snap time to grid if enabled
@@ -146,7 +158,7 @@ impl<'a> TimelineWidget<'a> {
         let mut events = Vec::new();
 
         // For drag-and-drop: store dropped media info
-        let mut dropped_media: Option<crate::types::media_library::MediaItem> = None;
+        let mut dropped_media: Option<(crate::types::media_library::MediaItem, f64, usize)> = None;
 
         // Layout constants
         const TRACK_HEIGHT: f32 = 60.0;
@@ -252,27 +264,185 @@ impl<'a> TimelineWidget<'a> {
                 }
 
                 // --- Drag-and-drop drop zone for timeline area ---
-                // This covers the entire tracks area for dropping media items
-                let drop_zone_frame = egui::Frame::new();
-                let (drop_response, dropped_payload) = ui
+                let drop_zone_frame = egui::Frame::default().inner_margin(4.0);
+                let (_, dropped_payload) = ui
                     .dnd_drop_zone::<crate::types::media_library::MediaItem, ()>(
                         drop_zone_frame,
                         |ui| {
                             // Highlight if hovered
-                            if ui.ctx().memory(|mem| mem.is_anything_being_dragged()) {
-                                let rect = ui.max_rect();
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    0.0,
-                                    egui::Stroke::new(2.0, egui::Color32::YELLOW),
-                                    egui::StrokeKind::Inside,
-                                );
+                            if ui.ctx().dragged_id().is_some() {
+                                if let Some(hover_pos) = ui.ctx().input(|i| i.pointer.latest_pos())
+                                {
+                                    if tracks_rect.contains(hover_pos) {
+                                        let drop_time = self
+                                            .state
+                                            .x_to_time(hover_pos.x - tracks_rect.left())
+                                            .max(0.0);
+                                        let drop_x = self.state.time_to_x(drop_time);
+                                        let drop_track_idx = ((hover_pos.y - tracks_rect.top())
+                                            / TRACK_HEIGHT)
+                                            .floor()
+                                            as usize;
+
+                                        // Draw drop indicator line
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(
+                                                    tracks_rect.left() + drop_x,
+                                                    tracks_rect.top(),
+                                                ),
+                                                egui::pos2(
+                                                    tracks_rect.left() + drop_x,
+                                                    tracks_rect.bottom(),
+                                                ),
+                                            ],
+                                            egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                                        );
+
+                                        // Optionally, highlight the track
+                                        let track_y = tracks_rect.top()
+                                            + drop_track_idx as f32 * TRACK_HEIGHT;
+                                        let track_rect = egui::Rect::from_min_size(
+                                            egui::pos2(tracks_rect.left(), track_y),
+                                            egui::vec2(tracks_rect.width(), TRACK_HEIGHT),
+                                        );
+                                        painter.rect_stroke(
+                                            track_rect,
+                                            0.0,
+                                            egui::Stroke::new(2.0, egui::Color32::YELLOW),
+                                            egui::StrokeKind::Outside,
+                                        );
+                                    }
+                                }
                             }
                         },
                     );
                 if let Some(media_arc) = dropped_payload {
                     if let Some(media) = std::sync::Arc::into_inner(media_arc) {
-                        dropped_media = Some(media);
+                        // Determine drop position
+                        let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos());
+                        let (drop_time, drop_track_idx) = if let Some(pos) = pointer_pos {
+                            (
+                                self.state.x_to_time(pos.x - tracks_rect.left()).max(0.0),
+                                {
+                                    let idx = ((pos.y - tracks_rect.top()) / TRACK_HEIGHT).floor() as usize;
+                                    let clamped_idx = idx.min(self.timeline.tracks.len());
+                                    println!("Calculated drop_track_idx: {}, clamped to: {}, tracks.len(): {}", idx, clamped_idx, self.timeline.tracks.len());
+                                    clamped_idx
+                                },
+                            )
+                        } else {
+                            (0.0, self.timeline.tracks.len())
+                        };
+
+                        match media {
+                            crate::types::media_library::MediaItem::VideoItem(video) => {
+                                // Try to add to an existing video track at drop_track_idx, or create a new one
+                                let mut added = false;
+                                if !self.timeline.tracks.is_empty() && drop_track_idx < self.timeline.tracks.len() {
+                                    if let Some(track) = self.timeline.tracks.get_mut(drop_track_idx) {
+                                        if let crate::types::track::Track::Video(video_track) = track {
+                                            video_track.clips.push(crate::types::media::VideoClip {
+                                                id: format!("clip{}", video_track.clips.len() + 1),
+                                                asset_path: video.file_descriptor.path.clone(),
+                                                in_point: 0.0,
+                                                out_point: 5.0,
+                                                start_time: drop_time,
+                                                duration: 5.0,
+                                                metadata: crate::types::media::VideoMetadata {
+                                                    resolution: (1920, 1080),
+                                                    frame_rate: 30.0,
+                                                    codec: "unknown".to_string(),
+                                                },
+                                            });
+                                            added = true;
+                                        }
+                                    }
+                                }
+                                if !added {
+                                    // Create a new video track and add the clip
+                                    let mut video_track = crate::types::track::VideoTrack {
+                                        id: format!("track{}", self.timeline.tracks.len() + 1),
+                                        name: format!(
+                                            "Video Track {}",
+                                            self.timeline.tracks.len() + 1
+                                        ),
+                                        clips: vec![],
+                                        muted: false,
+                                    };
+                                    video_track.clips.push(crate::types::media::VideoClip {
+                                        id: "clip1".to_string(),
+                                        asset_path: video.file_descriptor.path.clone(),
+                                        in_point: 0.0,
+                                        out_point: 5.0,
+                                        start_time: drop_time,
+                                        duration: 5.0,
+                                        metadata: crate::types::media::VideoMetadata {
+                                            resolution: (1920, 1080),
+                                            frame_rate: 30.0,
+                                            codec: "unknown".to_string(),
+                                        },
+                                    });
+                                    self.timeline
+                                        .tracks
+                                        .push(crate::types::track::Track::Video(video_track));
+                                }
+                            }
+                            crate::types::media_library::MediaItem::AudioItem(audio) => {
+                                // Try to add to an existing audio track at drop_track_idx, or create a new one
+                                let mut added = false;
+                                if !self.timeline.tracks.is_empty() && drop_track_idx < self.timeline.tracks.len() {
+                                    if let Some(track) = self.timeline.tracks.get_mut(drop_track_idx) {
+                                        if let crate::types::track::Track::Audio(audio_track) = track {
+                                            audio_track.clips.push(crate::types::media::AudioClip {
+                                                id: format!("clip{}", audio_track.clips.len() + 1),
+                                                asset_path: audio.file_descriptor.path.clone(),
+                                                in_point: 0.0,
+                                                out_point: 5.0,
+                                                start_time: drop_time,
+                                                duration: 5.0,
+                                                metadata: crate::types::media::AudioMetadata {
+                                                    sample_rate: 44100,
+                                                    channels: 2,
+                                                    codec: "unknown".to_string(),
+                                                    bitrate: 0,
+                                                },
+                                            });
+                                            added = true;
+                                        }
+                                    }
+                                }
+                                if !added {
+                                    // Create a new audio track and add the clip
+                                    let mut audio_track = crate::types::track::AudioTrack {
+                                        id: format!("track{}", self.timeline.tracks.len() + 1),
+                                        name: format!(
+                                            "Audio Track {}",
+                                            self.timeline.tracks.len() + 1
+                                        ),
+                                        clips: vec![],
+                                        muted: false,
+                                    };
+                                    audio_track.clips.push(crate::types::media::AudioClip {
+                                        id: "clip1".to_string(),
+                                        asset_path: audio.file_descriptor.path.clone(),
+                                        in_point: 0.0,
+                                        out_point: 5.0,
+                                        start_time: drop_time,
+                                        duration: 5.0,
+                                        metadata: crate::types::media::AudioMetadata {
+                                            sample_rate: 44100,
+                                            channels: 2,
+                                            codec: "unknown".to_string(),
+                                            bitrate: 0,
+                                        },
+                                    });
+                                    self.timeline
+                                        .tracks
+                                        .push(crate::types::track::Track::Audio(audio_track));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -284,7 +454,9 @@ impl<'a> TimelineWidget<'a> {
                 if ruler_response.clicked() || ruler_response.dragged() {
                     if let Some(pointer_pos) = ruler_response.interact_pointer_pos() {
                         let local_x = pointer_pos.x - ruler_rect.left();
-                        let new_time = self.state.x_to_time(local_x);
+                        let max_time = self.timeline.duration.max(999.0);
+                        let new_time = self.state.x_to_time(local_x).max(0.0).min(max_time);
+                        println!("Ruler interaction: local_x={}, new_time={}", local_x, new_time);
                         events.push(TimelineEvent::PlayheadMoved(new_time));
                     }
                 }
@@ -405,109 +577,7 @@ impl<'a> TimelineWidget<'a> {
                 }
 
                 // --- Handle drop of media item onto timeline ---
-                if let Some(media) = dropped_media {
-                    // Try to find a matching track, otherwise create a new one
-                    match media {
-                        crate::types::media_library::MediaItem::VideoItem(video) => {
-                            // Try to find a video track
-                            let mut found = false;
-                            for track in &mut self.timeline.tracks {
-                                if let crate::types::track::Track::Video(video_track) = track {
-                                    video_track.clips.push(crate::types::media::VideoClip {
-                                        id: format!("clip{}", video_track.clips.len() + 1),
-                                        asset_path: video.file_descriptor.path.clone(),
-                                        in_point: 0.0,
-                                        out_point: 5.0,
-                                        start_time: 0.0,
-                                        duration: 5.0,
-                                        metadata: crate::types::media::VideoMetadata {
-                                            resolution: (1920, 1080),
-                                            frame_rate: 30.0,
-                                            codec: "unknown".to_string(),
-                                        },
-                                    });
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                // Create a new video track and add the clip
-                                let mut video_track = crate::types::track::VideoTrack {
-                                    id: format!("track{}", self.timeline.tracks.len() + 1),
-                                    name: format!("Video Track {}", self.timeline.tracks.len() + 1),
-                                    clips: vec![],
-                                    muted: false,
-                                };
-                                video_track.clips.push(crate::types::media::VideoClip {
-                                    id: "clip1".to_string(),
-                                    asset_path: video.file_descriptor.path.clone(),
-                                    in_point: 0.0,
-                                    out_point: 5.0,
-                                    start_time: 0.0,
-                                    duration: 5.0,
-                                    metadata: crate::types::media::VideoMetadata {
-                                        resolution: (1920, 1080),
-                                        frame_rate: 30.0,
-                                        codec: "unknown".to_string(),
-                                    },
-                                });
-                                self.timeline
-                                    .tracks
-                                    .push(crate::types::track::Track::Video(video_track));
-                            }
-                        }
-                        crate::types::media_library::MediaItem::AudioItem(audio) => {
-                            // Try to find an audio track
-                            let mut found = false;
-                            for track in &mut self.timeline.tracks {
-                                if let crate::types::track::Track::Audio(audio_track) = track {
-                                    audio_track.clips.push(crate::types::media::AudioClip {
-                                        id: format!("clip{}", audio_track.clips.len() + 1),
-                                        asset_path: audio.file_descriptor.path.clone(),
-                                        in_point: 0.0,
-                                        out_point: 5.0,
-                                        start_time: 0.0,
-                                        duration: 5.0,
-                                        metadata: crate::types::media::AudioMetadata {
-                                            sample_rate: 44100,
-                                            channels: 2,
-                                            codec: "unknown".to_string(),
-                                            bitrate: 0,
-                                        },
-                                    });
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                // Create a new audio track and add the clip
-                                let mut audio_track = crate::types::track::AudioTrack {
-                                    id: format!("track{}", self.timeline.tracks.len() + 1),
-                                    name: format!("Audio Track {}", self.timeline.tracks.len() + 1),
-                                    clips: vec![],
-                                    muted: false,
-                                };
-                                audio_track.clips.push(crate::types::media::AudioClip {
-                                    id: "clip1".to_string(),
-                                    asset_path: audio.file_descriptor.path.clone(),
-                                    in_point: 0.0,
-                                    out_point: 5.0,
-                                    start_time: 0.0,
-                                    duration: 5.0,
-                                    metadata: crate::types::media::AudioMetadata {
-                                        sample_rate: 44100,
-                                        channels: 2,
-                                        codec: "unknown".to_string(),
-                                        bitrate: 0,
-                                    },
-                                });
-                                self.timeline
-                                    .tracks
-                                    .push(crate::types::track::Track::Audio(audio_track));
-                            }
-                        }
-                    }
-                }
+                // (handled above in the drop zone logic)
 
                 // --- Draw playhead ---
                 self.draw_playhead(&painter, ruler_rect, &mut events);
@@ -534,19 +604,26 @@ impl<'a> TimelineWidget<'a> {
                 // --- Handle right-click context menu ---
                 if ui.ctx().input(|i| i.pointer.secondary_down()) {
                     if let Some(click_pos) = ui.ctx().input(|i| i.pointer.press_origin()) {
-                        let time = self.state.x_to_time(click_pos.x - timeline_rect.left());
+                        let time = self
+                            .state
+                            .x_to_time(click_pos.x - timeline_rect.left())
+                            .max(0.0);
                         let track_idx = if click_pos.y > timeline_rect.top() + RULER_HEIGHT {
-                            Some(
-                                ((click_pos.y - timeline_rect.top() - RULER_HEIGHT) / TRACK_HEIGHT)
-                                    as usize,
-                            )
+                            let idx = ((click_pos.y - timeline_rect.top() - RULER_HEIGHT) / TRACK_HEIGHT) as usize;
+                            let clamped_idx = if self.timeline.tracks.is_empty() {
+                                0
+                            } else {
+                                idx.min(self.timeline.tracks.len().saturating_sub(1))
+                            };
+                            println!("Right-click: idx={}, clamped_idx={}, tracks.len={}", idx, clamped_idx, self.timeline.tracks.len());
+                            Some(clamped_idx)
                         } else {
                             None
                         };
                         events.push(TimelineEvent::RightClicked { time, track_idx });
                     }
                 }
-            });
+            }); // close .show(ui, |ui| { ... })
 
         events
     }
@@ -886,8 +963,10 @@ impl<'a> TimelineWidget<'a> {
                     }
                     DragState::Playhead { start_pos } => {
                         if let Some(current_pos) = ui.input(|i| i.pointer.latest_pos()) {
-                            let new_time =
-                                self.state.x_to_time(current_pos.x - timeline_rect.left());
+                            let new_time = self
+                                .state
+                                .x_to_time(current_pos.x - timeline_rect.left())
+                                .max(0.0);
                             let snapped_time =
                                 self.state.snap_time(new_time, self.snap_enabled).max(0.0);
                             events.push(TimelineEvent::PlayheadMoved(snapped_time));

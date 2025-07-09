@@ -2,6 +2,12 @@ use eframe::egui;
 use image::{ImageBuffer, Rgba};
 use std::path::PathBuf;
 
+// GStreamer imports
+use gst::prelude::*;
+use gstreamer as gst;
+use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
+
 /// A simple video player widget that decodes frames using ffmpeg-next and displays them in egui.
 /// This is a scaffold: actual frame decoding and playback logic should be expanded for real use.
 pub struct VideoPlayer {
@@ -30,25 +36,78 @@ impl VideoPlayer {
     }
 
     /// Call this to decode and upload the current frame as an egui texture.
-    /// This is a stub: you should implement actual frame extraction with ffmpeg-next.
+    /// Uses GStreamer to extract the frame.
     pub fn decode_and_upload_frame(&mut self, ctx: &egui::Context) {
-        // TODO: Use ffmpeg-next to decode the frame at self.current_frame from self.path.
-        // For now, just create a placeholder image.
-        let width = 320;
-        let height = 180;
-        let mut img = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(width, height);
-        for (x, y, pixel) in img.enumerate_pixels_mut() {
-            let r = (x as u8).wrapping_add(self.current_frame as u8 * 3);
-            let g = (y as u8).wrapping_add(self.current_frame as u8 * 7);
-            let b = 128u8;
-            *pixel = Rgba([r, g, b, 255]);
-        }
-        let color_img = egui::ColorImage::from_rgba_unmultiplied(
-            [width as usize, height as usize],
-            bytemuck::cast_slice(img.as_raw()),
+        let _ = gst::init(); // Safe to call multiple times
+
+        let path_str = self.path.to_string_lossy();
+        let pipeline_str = format!(
+            "filesrc location=\"{}\" ! decodebin ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink",
+            path_str
         );
-        self.texture =
-            Some(ctx.load_texture("video_frame", color_img, egui::TextureOptions::default()));
+
+        let pipeline = match gst::parse::launch(&pipeline_str) {
+            Ok(p) => p,
+            Err(_) => {
+                self.texture = None;
+                return;
+            }
+        };
+        let pipeline = pipeline
+            .downcast::<gst::Pipeline>()
+            .expect("Expected a gst::Pipeline");
+
+        // Seek to the desired frame (approximate by time)
+        // For simplicity, assume 30fps
+        let fps = 30.0;
+        let seek_time = (self.current_frame as f64 / fps * 1_000_000_000.0) as u64;
+        pipeline.set_state(gst::State::Paused).ok();
+        pipeline
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(seek_time),
+            )
+            .ok();
+        pipeline.set_state(gst::State::Playing).ok();
+
+        // Pull the sample from appsink
+        let sink = match pipeline.by_name("sink") {
+            Some(s) => match s.clone().downcast::<gst_app::AppSink>() {
+                Ok(appsink) => appsink,
+                Err(_) => {
+                    self.texture = None;
+                    pipeline.set_state(gst::State::Null).ok();
+                    return;
+                }
+            },
+            None => {
+                self.texture = None;
+                pipeline.set_state(gst::State::Null).ok();
+                return;
+            }
+        };
+
+        let sample_result = sink.pull_sample();
+        pipeline.set_state(gst::State::Null).ok();
+
+        if let Ok(sample) = sample_result {
+            let buffer = sample.buffer().unwrap();
+            let map = buffer.map_readable().unwrap();
+            let caps = sample.caps().unwrap();
+            let s = caps.structure(0).unwrap();
+            let width = s.get::<i32>("width").unwrap() as u32;
+            let height = s.get::<i32>("height").unwrap() as u32;
+            let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, map.as_slice().to_vec())
+                .unwrap();
+            let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                bytemuck::cast_slice(img.as_raw()),
+            );
+            self.texture =
+                Some(ctx.load_texture("video_frame", color_img, egui::TextureOptions::default()));
+        } else {
+            self.texture = None;
+        }
     }
 
     /// Show the video player panel in egui.

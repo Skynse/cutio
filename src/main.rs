@@ -32,7 +32,7 @@ fn main() -> eframe::Result<()> {
         tracks: vec![],
         frame_rate: 30.0,
         resolution: (1920, 1080),
-        duration: 10.0,
+        duration: 600.0,
         // frame_rate and resolution are private, so do not set them here
     };
 

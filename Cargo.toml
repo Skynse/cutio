@@ -7,7 +7,10 @@ edition = "2024"
 bytemuck = "1.23.1"
 eframe = "0.31.1"
 egui_extras = { version = "0.31.1", features = ["image"] }
-ffmpeg-next = "7.1.0"
+gstreamer = "0.23.7"
+gstreamer-app = "0.23.5"
+gstreamer-video = "0.23.6"
+
 image = { version = "0.25.6", features = ["png"] }
 rfd = "0.15.3"
 serde = { version = "1.0.219", features = ["derive"] }

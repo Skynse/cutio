@@ -2,7 +2,7 @@ use std::ops::Sub;
 
 use crate::types::playback_state::PlaybackState;
 use crate::types::project::Project;
-use crate::types::timeline::Timeline;
+use crate::types::timeline::{self, Timeline};
 use eframe::egui;
 
 use crate::ui::medialib::medialib_panel;
@@ -55,6 +55,11 @@ impl eframe::App for CutioApp {
             });
             if elapsed > 0.0 {
                 self.state.playback_state.playhead += elapsed;
+                // Clamp playhead to timeline duration
+                let timeline = &self.state.project.timeline;
+                let max_time = timeline.duration.max(999.0);
+                self.state.playback_state.playhead =
+                    self.state.playback_state.playhead.clamp(0.0, max_time);
                 ctx.request_repaint(); // keep ticking
             } else {
                 // Schedule next repaint to keep playback smooth
@@ -119,17 +124,22 @@ impl eframe::App for CutioApp {
                         if ui.button("<<").clicked() {
                             self.state.playback_state.playhead =
                                 self.state.playback_state.playhead.sub(1.0);
+                            self.state.playback_state.playhead = self
+                                .state
+                                .playback_state
+                                .playhead
+                                .clamp(0.0, self.state.playback_state.playhead);
+                            let timeline = &self.state.project.timeline;
+                            let max_time = timeline.duration.max(999.0);
+                            self.state.playback_state.playhead =
+                                self.state.playback_state.playhead.clamp(0.0, max_time);
                         }
                         if ui.button(">>").clicked() {
                             self.state.playback_state.playhead += 1.0;
-                        }
-                        // Seek bar (scrubber)
-                        let total_frames = self.state.video_player.total_frames.max(1);
-                        let mut playhead_frame = self.state.playback_state.playhead as usize;
-                        let slider = egui::Slider::new(&mut playhead_frame, 0..=total_frames - 1)
-                            .text("Seek");
-                        if ui.add(slider).changed() {
-                            self.state.playback_state.playhead = playhead_frame as f64;
+                            let timeline = &self.state.project.timeline;
+                            let max_time = timeline.duration.max(999.0);
+                            self.state.playback_state.playhead =
+                                self.state.playback_state.playhead.clamp(0.0, max_time);
                         }
                     });
 
@@ -149,7 +159,10 @@ impl eframe::App for CutioApp {
                                 crate::ui::timeline_widget::TimelineEvent::PlayheadMoved(
                                     new_time,
                                 ) => {
-                                    self.state.playback_state.playhead = new_time;
+                                    let timeline = &self.state.project.timeline;
+                                    let max_time = timeline.duration.max(999.0);
+                                    self.state.playback_state.playhead =
+                                        new_time.clamp(0.0, max_time);
                                 }
                                 // Handle other events as needed
                                 _ => {}
