@@ -5,6 +5,7 @@ pub struct PlaybackState {
     pub loop_start: Option<f64>,
     pub loop_end: Option<f64>,
     pub volume: f64,
+    pub playback_rate: f64,
 }
 
 impl PlaybackState {
@@ -15,6 +16,7 @@ impl PlaybackState {
             loop_start: None,
             loop_end: None,
             volume: 1.0,
+            playback_rate: 1.0,
         }
     }
 }

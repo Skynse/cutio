@@ -1,4 +1,5 @@
 mod ops;
+mod renderer;
 mod types;
 mod ui;
 
@@ -8,11 +9,14 @@ use crate::types::project::{Project, ProjectSettings};
 use crate::types::timeline::Timeline;
 use crate::types::track::{Track, VideoTrack};
 use crate::ui::app::{AppState, CutioApp};
+use crate::ui::timeline_widget::TimelineState;
 use crate::ui::video_player::VideoPlayer;
+use gstreamer as gst;
 
 use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
+    let _ = gst::init();
     // Dummy video clip and track for testing
     let video_clip = VideoClip {
         id: "clip1".to_string(),
@@ -35,6 +39,8 @@ fn main() -> eframe::Result<()> {
         duration: 600.0,
         // frame_rate and resolution are private, so do not set them here
     };
+    use std::sync::{Arc, RwLock};
+    let timeline_arc = Arc::new(RwLock::new(timeline.clone()));
 
     let project = Project {
         name: "Untitled Project".to_string(),
@@ -55,16 +61,20 @@ fn main() -> eframe::Result<()> {
 
     let playback_state = PlaybackState::new();
 
-    // VideoPlayer::new expects two arguments: PathBuf and AppState
-    // But AppState is not yet constructed, so we need to construct it first
-    // So we construct AppState without video_player first, then create VideoPlayer, then set it in AppState
+    let timeline_arc = Arc::new(RwLock::new(timeline.clone()));
+    let video_player = VideoPlayer::new(
+        timeline_arc.clone(),
+        640,  // width for preview
+        360,  // height for preview
+        30.0, // frame rate
+        playback_state.clone(),
+    );
     let app_state = AppState {
         project,
-        video_player: VideoPlayer::new(PathBuf::from(
-            r"C:\Users\austi\projects\cutio\testdata\sample.mp4",
-        )),
         playback_state,
-        timeline_state: crate::ui::timeline_widget::TimelineState::new(),
+        video_player,
+        timeline: timeline_arc.clone(),
+        timeline_state: TimelineState::new(),
     };
 
     let app = CutioApp { state: app_state };

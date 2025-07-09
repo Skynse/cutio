@@ -4,6 +4,7 @@ use crate::types::playback_state::PlaybackState;
 use crate::types::project::Project;
 use crate::types::timeline::{self, Timeline};
 use eframe::egui;
+use std::sync::{Arc, RwLock};
 
 use crate::ui::medialib::medialib_panel;
 use crate::ui::timeline_widget::{TimelineState, TimelineWidget};
@@ -12,6 +13,7 @@ pub struct AppState {
     pub project: Project,
     pub playback_state: PlaybackState,
     pub video_player: crate::ui::video_player::VideoPlayer,
+    pub timeline: Arc<RwLock<Timeline>>,
     pub timeline_state: TimelineState,
 }
 
@@ -27,8 +29,7 @@ impl CutioApp {
 
 impl eframe::App for CutioApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- Timeline playback: advance playhead by 1.0 per second if playing ---
-        // Use a local static for last play time, but avoid mutable static ref
+        // --- Timeline playback: advance playhead in AppState and update VideoPlayer with set_playhead ---
         use std::time::{Duration, Instant};
         thread_local! {
             static LAST_PLAY_TIME: std::cell::RefCell<Option<Instant>> = std::cell::RefCell::new(None);
@@ -44,9 +45,7 @@ impl eframe::App for CutioApp {
                     Duration::from_secs(0)
                 };
 
-                // Update more frequently for smoother playback
                 if dt >= Duration::from_millis(33) {
-                    // ~30 FPS update rate
                     *last = Some(now);
                     dt.as_secs_f64()
                 } else {
@@ -58,26 +57,22 @@ impl eframe::App for CutioApp {
             });
 
             if elapsed > 0.0 {
-                // Clamp elapsed time to prevent large jumps
-                let elapsed = elapsed.min(0.1); // Max 100ms jump
-                self.state.playback_state.playhead += elapsed;
-
-                // Clamp playhead to timeline duration
                 let timeline = &self.state.project.timeline;
                 let max_time = timeline.duration.max(999.0);
+                self.state.playback_state.playhead +=
+                    elapsed * self.state.playback_state.playback_rate;
                 self.state.playback_state.playhead =
                     self.state.playback_state.playhead.clamp(0.0, max_time);
-
-                // Update video player frame
-                let playhead_frame = (self.state.playback_state.playhead * 30.0) as usize;
-                self.state.video_player.set_frame(playhead_frame, ctx);
-
-                ctx.request_repaint(); // keep ticking
+                ctx.request_repaint();
             } else {
-                // Schedule next repaint to keep playback smooth
-                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
+
+        // Always update the video player to reflect the current playhead
+        self.state
+            .video_player
+            .set_playhead(self.state.playback_state.playhead, ctx);
 
         // Left: Media Library
         egui::SidePanel::left("media_panel").show(ctx, |ui| {
@@ -108,11 +103,7 @@ impl eframe::App for CutioApp {
 
         // Right/Top: Video Player
         egui::TopBottomPanel::top("video_player_panel").show(ctx, |ui| {
-            // Only update frame if not playing (to avoid double updates)
-            if !self.state.playback_state.is_playing {
-                let playhead_frame = (self.state.playback_state.playhead * 30.0) as usize;
-                self.state.video_player.set_frame(playhead_frame, ctx);
-            }
+            // Always show the timeline-rendered frame
             self.state.video_player.show(ui, ctx);
         });
 
@@ -124,6 +115,17 @@ impl eframe::App for CutioApp {
                 ui.vertical(|ui| {
                     // Playback controls
                     ui.horizontal(|ui| {
+                        // Helper to reset the LAST_PLAY_TIME thread-local
+                        fn reset_last_play_time() {
+                            use std::time::Instant;
+                            thread_local! {
+                                static LAST_PLAY_TIME: std::cell::RefCell<Option<Instant>> = std::cell::RefCell::new(None);
+                            }
+                            LAST_PLAY_TIME.with(|last_play_time| {
+                                *last_play_time.borrow_mut() = Some(Instant::now());
+                            });
+                        }
+
                         if ui
                             .button(if self.state.playback_state.is_playing {
                                 "Pause"
@@ -134,50 +136,58 @@ impl eframe::App for CutioApp {
                         {
                             self.state.playback_state.is_playing =
                                 !self.state.playback_state.is_playing;
+                            reset_last_play_time();
                         }
                         if ui.button("<<").clicked() {
                             self.state.playback_state.playhead =
                                 (self.state.playback_state.playhead - 1.0).max(0.0);
-                            let timeline = &self.state.project.timeline;
+                            let timeline = self.state.timeline.read().unwrap();
                             let max_time = timeline.duration.max(999.0);
                             self.state.playback_state.playhead =
                                 self.state.playback_state.playhead.clamp(0.0, max_time);
+                            self.state
+                                .video_player
+                                .set_playhead(self.state.playback_state.playhead, ctx);
                         }
                         if ui.button(">>").clicked() {
                             self.state.playback_state.playhead += 1.0;
-                            let timeline = &self.state.project.timeline;
+                            let timeline = self.state.timeline.read().unwrap();
                             let max_time = timeline.duration.max(999.0);
                             self.state.playback_state.playhead =
                                 self.state.playback_state.playhead.clamp(0.0, max_time);
+                            self.state
+                                .video_player
+                                .set_playhead(self.state.playback_state.playhead, ctx);
                         }
                     });
 
                     // Timeline and track view
-                    ui.group(|ui| {
-                        let timeline = &mut self.state.project.timeline;
-                        let timeline_events = TimelineWidget::new(
-                            timeline,
+                    // Mutate timeline in a block, drop lock before rendering or updating video player
+                    let timeline_events = {
+                        let mut timeline = self.state.timeline.write().unwrap();
+                        TimelineWidget::new(
+                            &mut *timeline,
                             &mut self.state.timeline_state,
                             self.state.playback_state.playhead,
                         )
-                        .show(ui);
+                        .show(ui)
+                    };
 
-                        // Handle timeline events (e.g., playhead moved)
-                        for event in timeline_events {
-                            match event {
-                                crate::ui::timeline_widget::TimelineEvent::PlayheadMoved(
-                                    new_time,
-                                ) => {
-                                    let timeline = &self.state.project.timeline;
-                                    let max_time = timeline.duration.max(999.0);
-                                    self.state.playback_state.playhead =
-                                        new_time.clamp(0.0, max_time);
-                                }
-                                // Handle other events as needed
-                                _ => {}
+                    // Handle timeline events (e.g., playhead moved)
+                    for event in timeline_events {
+                        match event {
+                            crate::ui::timeline_widget::TimelineEvent::PlayheadMoved(new_time) => {
+                                let timeline = self.state.timeline.read().unwrap();
+                                let max_time = timeline.duration.max(999.0);
+                                self.state.playback_state.playhead = new_time.clamp(0.0, max_time);
+                                self.state
+                                    .video_player
+                                    .set_playhead(self.state.playback_state.playhead, ctx);
                             }
+                            // Handle other events as needed
+                            _ => {}
                         }
-                    });
+                    }
                 });
             });
 

@@ -10,6 +10,25 @@ pub struct Timeline {
     pub resolution: (u32, u32),
 }
 
+impl Timeline {
+    /// Returns all active video clips at a specific time.
+    pub fn active_video_clips_at(&self, time: f64) -> Vec<&VideoClip> {
+        self.tracks
+            .iter()
+            .filter_map(|track| match track {
+                Track::Video(video_track) => Some(video_track),
+                _ => None,
+            })
+            .flat_map(|video_track| {
+                video_track
+                    .clips
+                    .iter()
+                    .filter(move |clip| clip.is_active_at(time))
+            })
+            .collect()
+    }
+}
+
 /// Splits the first clip found at the given playhead on the specified track.
 /// Returns true if a split occurred, false otherwise.
 impl Timeline {
@@ -106,6 +125,18 @@ impl Timeline {
                         let clip_end = clip.start_time + clip.duration;
                         if clip_end > start && clip_start < end {
                             result.push(ActiveClip::Video(clip.clone()));
+                        }
+
+                        impl Track {
+                            pub fn is_video(&self) -> bool {
+                                matches!(self, Track::Video(_))
+                            }
+                        }
+
+                        impl VideoClip {
+                            pub fn is_active_at(&self, time: f64) -> bool {
+                                time >= self.start_time && time < self.start_time + self.duration
+                            }
                         }
                     }
                 }
